@@ -1,0 +1,28 @@
+module(
+    name = "distributed_ml_param_serve",
+    version = "0.1.0",
+)
+
+# ============================================================================
+# Dependencies
+# ============================================================================
+
+# gRPC (includes Protobuf, Abseil, etc. as transitive deps)
+bazel_dep(name = "grpc", version = "1.76.0.bcr.1", repo_name = "com_github_grpc_grpc")
+
+# Rules
+bazel_dep(name = "rules_cc", version = "0.2.13")
+bazel_dep(name = "rules_proto", version = "7.1.0")
+
+# Protobuf (explicit dep needed for proto_library / cc_proto_library rules)
+bazel_dep(name = "protobuf", version = "33.0", repo_name = "com_google_protobuf")
+
+# Testing
+bazel_dep(name = "googletest", version = "1.17.0.bcr.2", repo_name = "com_google_googletest")
+
+# CUDA
+bazel_dep(name = "rules_cuda", version = "0.3.0")
+
+cuda = use_extension("@rules_cuda//cuda:extensions.bzl", "toolchain")
+cuda.toolkit(name = "cuda")
+use_repo(cuda, "cuda")

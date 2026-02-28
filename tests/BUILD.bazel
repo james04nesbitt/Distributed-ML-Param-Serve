@@ -1,0 +1,62 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+load("@rules_cuda//cuda:defs.bzl", "cuda_library")
+
+cc_test(
+    name = "parameter_store_test",
+    srcs = ["parameter_store_test.cc"],
+    deps = [
+        "//src/core:parameter_store",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "sparse_format_test",
+    srcs = ["sparse_format_test.cc"],
+    deps = [
+        "//src/core:sparse_format",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+# CUDA tests — require CUDA toolkit and GPU; tests GTEST_SKIP if no device.
+_CUDA_COPTS = [
+    "--std=c++17",
+    "-Xcompiler=/std:c++17",
+]
+
+cuda_library(
+    name = "gpu_parameter_store_test_lib",
+    srcs = ["gpu_parameter_store_test.cu"],
+    copts = _CUDA_COPTS,
+    deps = [
+        "//src/cuda:gpu_parameter_store",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "gpu_parameter_store_test",
+    deps = [
+        ":gpu_parameter_store_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cuda_library(
+    name = "gpu_sparse_ops_test_lib",
+    srcs = ["gpu_sparse_ops_test.cu"],
+    copts = _CUDA_COPTS,
+    deps = [
+        "//src/cuda:gpu_sparse_ops",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "gpu_sparse_ops_test",
+    deps = [
+        ":gpu_sparse_ops_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

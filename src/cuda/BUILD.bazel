@@ -1,0 +1,23 @@
+load("@rules_cuda//cuda:defs.bzl", "cuda_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# NVCC flags: enable C++17 for both nvcc and host compiler (MSVC)
+_CUDA_COPTS = [
+    "--std=c++17",
+    "-Xcompiler=/std:c++17",
+]
+
+cuda_library(
+    name = "gpu_parameter_store",
+    srcs = ["gpu_parameter_store.cu"],
+    hdrs = ["gpu_parameter_store.cuh"],
+    copts = _CUDA_COPTS,
+)
+
+cuda_library(
+    name = "gpu_sparse_ops",
+    srcs = ["gpu_sparse_ops.cu"],
+    hdrs = ["gpu_sparse_ops.cuh"],
+    copts = _CUDA_COPTS,
+)

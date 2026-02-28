@@ -1,0 +1,15 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "parameter_store",
+    srcs = ["parameter_store.cc"],
+    hdrs = ["parameter_store.h"],
+)
+
+cc_library(
+    name = "sparse_format",
+    srcs = ["sparse_format.cc"],
+    hdrs = ["sparse_format.h"],
+)

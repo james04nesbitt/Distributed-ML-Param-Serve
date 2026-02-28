@@ -1,0 +1,16 @@
+# Short output root to avoid Windows 260-char path limit with deep deps (envoy_api)
+startup --output_user_root=C:/b
+
+# C++ standard (MSVC uses /std:c++17, GCC/Clang use -std=c++17)
+build --cxxopt=/std:c++17
+build --host_cxxopt=/std:c++17
+
+# Optimized builds
+build:opt --compilation_mode=opt
+build:opt --copt=/O2
+
+# Debug builds
+build:dbg --compilation_mode=dbg
+
+# Test output
+test --test_output=errors

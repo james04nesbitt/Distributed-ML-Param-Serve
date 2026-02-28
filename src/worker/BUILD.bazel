@@ -1,0 +1,23 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "worker_client",
+    srcs = ["worker_client.cc"],
+    hdrs = ["worker_client.h"],
+    deps = [
+        "//proto:parameter_server_cc_grpc",
+        "//proto:parameter_server_cc_proto",
+        "@com_github_grpc_grpc//:grpc++",
+    ],
+)
+
+cc_binary(
+    name = "worker",
+    srcs = ["worker_main.cc"],
+    deps = [
+        ":worker_client",
+        "@com_github_grpc_grpc//:grpc++",
+    ],
+)

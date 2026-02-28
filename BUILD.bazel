@@ -1,0 +1,2 @@
+# Root BUILD file for Distributed ML Parameter Server
+package(default_visibility = ["//visibility:public"])

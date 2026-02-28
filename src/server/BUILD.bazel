@@ -1,0 +1,25 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "parameter_server_impl",
+    srcs = ["parameter_server_impl.cc"],
+    hdrs = ["parameter_server_impl.h"],
+    deps = [
+        "//proto:parameter_server_cc_grpc",
+        "//proto:parameter_server_cc_proto",
+        "//src/core:parameter_store",
+        "@com_github_grpc_grpc//:grpc++",
+    ],
+)
+
+cc_binary(
+    name = "parameter_server",
+    srcs = ["server_main.cc"],
+    deps = [
+        ":parameter_server_impl",
+        "//src/core:parameter_store",
+        "@com_github_grpc_grpc//:grpc++",
+    ],
+)

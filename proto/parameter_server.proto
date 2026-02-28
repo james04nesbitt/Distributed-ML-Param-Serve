@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package paramserver;
+
+option cc_enable_arenas = true;
+
+// ============================================================================
+// Messages
+// ============================================================================
+
+// Compressed Sparse Row (CSR) representation of a gradient matrix.
+// Only non-zero values are transmitted, dramatically reducing payload sizes
+// for sparse models.
+message CSRMatrix {
+  repeated float values = 1;       // Non-zero values (nnz elements)
+  repeated int32 col_indices = 2;  // Column index for each non-zero value
+  repeated int32 row_offsets = 3;  // Start index in values[] for each row
+  int32 num_rows = 4;
+  int32 num_cols = 5;
+}
+
+// A gradient update sent from a worker to the parameter server.
+message GradientUpdate {
+  string layer_name = 1;          // Which layer/parameter this gradient is for
+  CSRMatrix gradients = 2;        // Sparse gradient in CSR format
+  float learning_rate = 3;        // Learning rate for this update
+  int32 worker_id = 4;            // ID of the sending worker
+  int64 iteration = 5;            // Training iteration number
+}
+
+// Request to push gradients to the server.
+message PushRequest {
+  repeated GradientUpdate updates = 1;  // Batch of gradient updates
+}
+
+// Response after gradients have been applied.
+message PushResponse {
+  bool success = 1;
+  string message = 2;
+  int64 server_iteration = 3;    // Server's current global iteration
+}
+
+// Request to pull parameters from the server.
+message PullRequest {
+  repeated string layer_names = 1;  // Which layers to pull (empty = all)
+  int32 worker_id = 2;
+}
+
+// A single layer's parameters.
+message ParameterData {
+  string layer_name = 1;
+  repeated float values = 2;     // Dense parameter values (flattened)
+  repeated int32 shape = 3;      // Tensor shape
+}
+
+// Response containing requested parameters.
+message PullResponse {
+  repeated ParameterData parameters = 1;
+  int64 server_iteration = 2;
+}
+
+// Worker registration info.
+message RegisterRequest {
+  string worker_address = 1;     // Worker's hostname:port
+  int32 worker_id = 2;
+}
+
+message RegisterResponse {
+  bool success = 1;
+  int32 assigned_id = 2;         // Server-assigned worker ID
+  string message = 3;
+}
+
+// ============================================================================
+// Service
+// ============================================================================
+
+service ParameterServer {
+  // Push sparse gradients from a worker to the server.
+  rpc PushGradients(PushRequest) returns (PushResponse);
+
+  // Pull current parameters from the server.
+  rpc PullParameters(PullRequest) returns (PullResponse);
+
+  // Register a new worker with the server.
+  rpc RegisterWorker(RegisterRequest) returns (RegisterResponse);
+}
