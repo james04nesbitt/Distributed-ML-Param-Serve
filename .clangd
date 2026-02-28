@@ -1,0 +1,41 @@
+# Clangd configuration for Distributed-ML-Param-Serve
+# Handles Bazel-managed includes and CUDA (.cu/.cuh) files
+
+CompileFlags:
+  Add:
+    - "-std=c++17"
+    - "-I."
+    - "-IC:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1/include"
+  Remove:
+    - "-forward-unknown-to-host-compiler"
+
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+  Suppress:
+    - "pp_file_not_found"
+    - "undeclared_var_use"
+    - "unknown_typename"
+    - "typename_missing"
+    - "typecheck_*"
+
+---
+
+# CUDA files: suppress all diagnostics since clangd can't fully parse .cu
+If:
+  PathMatch: [".*\\.cu", ".*\\.cuh"]
+
+CompileFlags:
+  Add:
+    - "-std=c++17"
+    - "-I."
+    - "-IC:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1/include"
+    - "-x"
+    - "cuda"
+    - "--cuda-path=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1"
+    - "--cuda-gpu-arch=sm_75"
+    - "-nocudalib"
+    - "-nogpuinc"
+
+Diagnostics:
+  Suppress: ["*"]
