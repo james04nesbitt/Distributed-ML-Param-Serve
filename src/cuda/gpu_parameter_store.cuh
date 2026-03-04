@@ -35,11 +35,17 @@ public:
                              int32_t num_cols, float learning_rate,
                              void *stream = nullptr);
 
-  // Copy parameters from device to host.
+  // Copy parameters from device to host (synchronous, pageable memory).
   void CopyToHost(float *host_dst, int32_t count) const;
 
-  // Copy parameters from host to device.
+  // Copy parameters from host to device (synchronous, pageable memory).
   void CopyFromHost(const float *host_src, int32_t count);
+
+  // Async copy to pinned host memory on a CUDA stream.
+  void CopyToHostAsync(float *pinned_dst, int32_t count, void *stream) const;
+
+  // Async copy from pinned host memory on a CUDA stream.
+  void CopyFromHostAsync(const float *pinned_src, int32_t count, void *stream);
 
   // Get raw device pointer (for kernel use).
   float *device_data() { return d_params_; }

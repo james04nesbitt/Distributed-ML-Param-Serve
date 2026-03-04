@@ -1,6 +1,17 @@
 #include "src/cuda/gpu_sparse_ops.cuh"
 
 #include <cuda_runtime.h>
+#include <thrust/copy.h>
+#include <thrust/count.h>
+#include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
+#include <thrust/functional.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/discard_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
+#include <thrust/reduce.h>
+#include <thrust/scan.h>
 
 #include <cmath>
 #include <stdexcept>
@@ -39,45 +50,137 @@ void DeviceCSR::Free() {
 }
 
 // ============================================================================
-// GPU CSR Compression — Stub (full implementation in Milestone 5)
+// GPU CSR Compression — Fully on-device using Thrust
 //
-// For now, compression is done on the CPU and transferred to the device.
-// A future milestone will implement prefix-sum-based GPU compression.
+// Algorithm:
+//   1. Build a binary mask: mask[i] = (|dense[i]| > threshold) ? 1 : 0
+//   2. Per-row NNZ: reduce_by_key over row indices with mask values
+//   3. Row offsets: exclusive_scan over per-row NNZ counts
+//   4. Per-element scatter index: exclusive_scan over the flat mask
+//   5. Compact kernel: scatter non-zero values + column indices
 // ============================================================================
+
+// Kernel: threshold mask — 1 if |val| > threshold, else 0
+__global__ void ThresholdMaskKernel(const float *dense, int32_t *mask,
+                                    int32_t total, float threshold) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < total) {
+    float val = dense[idx];
+    mask[idx] = (val > threshold || val < -threshold) ? 1 : 0;
+  }
+}
+
+// Kernel: scatter non-zero values and column indices into compact arrays
+__global__ void CompactKernel(const float *dense, const int32_t *mask,
+                              const int32_t *scatter_indices, float *values,
+                              int32_t *col_indices, int32_t total,
+                              int32_t num_cols) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < total && mask[idx]) {
+    int out_idx = scatter_indices[idx];
+    values[out_idx] = dense[idx];
+    col_indices[out_idx] = idx % num_cols;
+  }
+}
+
+// Kernel: count non-zeros per row
+__global__ void CountNNZPerRowKernel(const int32_t *mask, int32_t *row_nnz,
+                                     int32_t num_rows, int32_t num_cols) {
+  int row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < num_rows) {
+    int count = 0;
+    const int32_t *row_start = mask + row * num_cols;
+    for (int col = 0; col < num_cols; ++col) {
+      count += row_start[col];
+    }
+    row_nnz[row] = count;
+  }
+}
 
 DeviceCSR CompressToCSRDevice(const float *d_dense, int32_t num_rows,
                               int32_t num_cols, float threshold, void *stream) {
-  // TODO(milestone-5): Implement GPU-side CSR compression using:
-  //   1. Per-element threshold kernel → binary mask
-  //   2. Prefix sum (thrust::exclusive_scan) → row_offsets + scatter indices
-  //   3. Compact kernel → values + col_indices
-  //
-  // For now, fall back to CPU:
   int32_t total = num_rows * num_cols;
-  std::vector<float> host_dense(total);
-  CheckCuda(cudaMemcpy(host_dense.data(), d_dense, total * sizeof(float),
+  constexpr int kBlockSize = 256;
+
+  // --- Step 1: Build binary mask on device ---
+  int32_t *d_mask = nullptr;
+  CheckCuda(cudaMalloc(&d_mask, total * sizeof(int32_t)),
+            "CompressToCSR: alloc mask");
+
+  int mask_blocks = (total + kBlockSize - 1) / kBlockSize;
+  ThresholdMaskKernel<<<mask_blocks, kBlockSize>>>(d_dense, d_mask, total,
+                                                   threshold);
+  CheckCuda(cudaGetLastError(), "ThresholdMaskKernel");
+
+  // --- Step 2: Prefix sum over flat mask → scatter indices ---
+  int32_t *d_scatter = nullptr;
+  CheckCuda(cudaMalloc(&d_scatter, total * sizeof(int32_t)),
+            "CompressToCSR: alloc scatter");
+
+  thrust::device_ptr<int32_t> mask_ptr(d_mask);
+  thrust::device_ptr<int32_t> scatter_ptr(d_scatter);
+  thrust::exclusive_scan(mask_ptr, mask_ptr + total, scatter_ptr);
+
+  // Total NNZ = scatter[last] + mask[last]
+  int32_t last_scatter = 0, last_mask = 0;
+  CheckCuda(cudaMemcpy(&last_scatter, d_scatter + total - 1, sizeof(int32_t),
                        cudaMemcpyDeviceToHost),
-            "CompressToCSRDevice: copy to host");
+            "CompressToCSR: read last scatter");
+  CheckCuda(cudaMemcpy(&last_mask, d_mask + total - 1, sizeof(int32_t),
+                       cudaMemcpyDeviceToHost),
+            "CompressToCSR: read last mask");
+  int32_t nnz = last_scatter + last_mask;
 
-  // CPU compression
-  std::vector<float> values;
-  std::vector<int32_t> col_indices;
-  std::vector<int32_t> row_offsets;
-  row_offsets.reserve(num_rows + 1);
+  // --- Step 3: Per-row NNZ → row_offsets via exclusive_scan ---
+  int32_t *d_row_nnz = nullptr;
+  CheckCuda(cudaMalloc(&d_row_nnz, num_rows * sizeof(int32_t)),
+            "CompressToCSR: alloc row_nnz");
 
-  for (int32_t row = 0; row < num_rows; ++row) {
-    row_offsets.push_back(static_cast<int32_t>(values.size()));
-    for (int32_t col = 0; col < num_cols; ++col) {
-      float val = host_dense[row * num_cols + col];
-      if (std::fabs(val) > threshold) {
-        values.push_back(val);
-        col_indices.push_back(col);
-      }
-    }
+  int row_blocks = (num_rows + kBlockSize - 1) / kBlockSize;
+  CountNNZPerRowKernel<<<row_blocks, kBlockSize>>>(d_mask, d_row_nnz, num_rows,
+                                                   num_cols);
+  CheckCuda(cudaGetLastError(), "CountNNZPerRowKernel");
+
+  // row_offsets has num_rows+1 entries
+  int32_t *d_row_offsets = nullptr;
+  CheckCuda(cudaMalloc(&d_row_offsets, (num_rows + 1) * sizeof(int32_t)),
+            "CompressToCSR: alloc row_offsets");
+
+  thrust::device_ptr<int32_t> row_nnz_ptr(d_row_nnz);
+  thrust::device_ptr<int32_t> row_off_ptr(d_row_offsets);
+  thrust::exclusive_scan(row_nnz_ptr, row_nnz_ptr + num_rows, row_off_ptr);
+
+  // Set row_offsets[num_rows] = nnz
+  CheckCuda(cudaMemcpy(d_row_offsets + num_rows, &nnz, sizeof(int32_t),
+                       cudaMemcpyHostToDevice),
+            "CompressToCSR: set final row offset");
+
+  cudaFree(d_row_nnz);
+
+  // --- Step 4: Compact values and col_indices ---
+  DeviceCSR csr;
+  csr.num_rows = num_rows;
+  csr.num_cols = num_cols;
+  csr.nnz = nnz;
+  csr.d_row_offsets = d_row_offsets;
+
+  if (nnz > 0) {
+    CheckCuda(cudaMalloc(&csr.d_values, nnz * sizeof(float)),
+              "CompressToCSR: alloc values");
+    CheckCuda(cudaMalloc(&csr.d_col_indices, nnz * sizeof(int32_t)),
+              "CompressToCSR: alloc col_indices");
+
+    CompactKernel<<<mask_blocks, kBlockSize>>>(d_dense, d_mask, d_scatter,
+                                               csr.d_values, csr.d_col_indices,
+                                               total, num_cols);
+    CheckCuda(cudaGetLastError(), "CompactKernel");
+    CheckCuda(cudaDeviceSynchronize(), "CompressToCSR: sync after compact");
   }
-  row_offsets.push_back(static_cast<int32_t>(values.size()));
 
-  return HostToDeviceCSR(values, col_indices, row_offsets, num_rows, num_cols);
+  cudaFree(d_mask);
+  cudaFree(d_scatter);
+
+  return csr;
 }
 
 // ============================================================================
@@ -120,7 +223,7 @@ void DecompressFromCSRDevice(const DeviceCSR &csr, float *d_dense,
 }
 
 // ============================================================================
-// Host ↔ Device Transfers
+// Host ↔ Device Transfers (pageable memory — original API)
 // ============================================================================
 
 void DeviceCSRToHost(const DeviceCSR &csr, std::vector<float> &values,
@@ -173,6 +276,76 @@ DeviceCSR HostToDeviceCSR(const std::vector<float> &values,
                        (num_rows + 1) * sizeof(int32_t),
                        cudaMemcpyHostToDevice),
             "HostToDeviceCSR: copy row_offsets");
+
+  return csr;
+}
+
+// ============================================================================
+// Pinned-Memory Async Transfers (PCIe-optimized)
+// ============================================================================
+
+HostCSRPinned DeviceCSRToHostPinned(const DeviceCSR &csr, void *stream) {
+  auto s = static_cast<cudaStream_t>(stream);
+
+  HostCSRPinned host;
+  host.num_rows = csr.num_rows;
+  host.num_cols = csr.num_cols;
+  host.nnz = csr.nnz;
+
+  host.row_offsets = PinnedBuffer<int32_t>(csr.num_rows + 1);
+  CheckCuda(cudaMemcpyAsync(host.row_offsets.data(), csr.d_row_offsets,
+                            (csr.num_rows + 1) * sizeof(int32_t),
+                            cudaMemcpyDeviceToHost, s),
+            "DeviceCSRToHostPinned: row_offsets");
+
+  if (csr.nnz > 0) {
+    host.values = PinnedBuffer<float>(csr.nnz);
+    host.col_indices = PinnedBuffer<int32_t>(csr.nnz);
+
+    CheckCuda(cudaMemcpyAsync(host.values.data(), csr.d_values,
+                              csr.nnz * sizeof(float), cudaMemcpyDeviceToHost,
+                              s),
+              "DeviceCSRToHostPinned: values");
+    CheckCuda(cudaMemcpyAsync(host.col_indices.data(), csr.d_col_indices,
+                              csr.nnz * sizeof(int32_t), cudaMemcpyDeviceToHost,
+                              s),
+              "DeviceCSRToHostPinned: col_indices");
+  }
+
+  return host;
+}
+
+DeviceCSR HostToDeviceCSRAsync(const HostCSRPinned &host_csr, void *stream) {
+  auto s = static_cast<cudaStream_t>(stream);
+
+  DeviceCSR csr;
+  csr.num_rows = host_csr.num_rows;
+  csr.num_cols = host_csr.num_cols;
+  csr.nnz = host_csr.nnz;
+
+  CheckCuda(
+      cudaMalloc(&csr.d_row_offsets, (csr.num_rows + 1) * sizeof(int32_t)),
+      "HostToDeviceCSRAsync: alloc row_offsets");
+  CheckCuda(cudaMemcpyAsync(csr.d_row_offsets, host_csr.row_offsets.data(),
+                            (csr.num_rows + 1) * sizeof(int32_t),
+                            cudaMemcpyHostToDevice, s),
+            "HostToDeviceCSRAsync: copy row_offsets");
+
+  if (csr.nnz > 0) {
+    CheckCuda(cudaMalloc(&csr.d_values, csr.nnz * sizeof(float)),
+              "HostToDeviceCSRAsync: alloc values");
+    CheckCuda(cudaMemcpyAsync(csr.d_values, host_csr.values.data(),
+                              csr.nnz * sizeof(float), cudaMemcpyHostToDevice,
+                              s),
+              "HostToDeviceCSRAsync: copy values");
+
+    CheckCuda(cudaMalloc(&csr.d_col_indices, csr.nnz * sizeof(int32_t)),
+              "HostToDeviceCSRAsync: alloc col_indices");
+    CheckCuda(cudaMemcpyAsync(csr.d_col_indices, host_csr.col_indices.data(),
+                              csr.nnz * sizeof(int32_t), cudaMemcpyHostToDevice,
+                              s),
+              "HostToDeviceCSRAsync: copy col_indices");
+  }
 
   return csr;
 }

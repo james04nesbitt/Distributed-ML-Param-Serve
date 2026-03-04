@@ -1,0 +1,58 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_cuda//cuda:defs.bzl", "cuda_library")
+
+package(default_visibility = ["//visibility:public"])
+
+_CUDA_COPTS = [
+    "--std=c++17",
+    "-Xcompiler=/std:c++17",
+]
+
+# ---------- Benchmark 1: GPU Throughput & CPU vs GPU Speedup ----------
+
+cuda_library(
+    name = "gpu_throughput_bench_lib",
+    srcs = ["gpu_throughput_bench.cu"],
+    copts = _CUDA_COPTS,
+    deps = [
+        "//src/cuda:gpu_parameter_store",
+    ],
+)
+
+cc_binary(
+    name = "gpu_throughput_bench",
+    deps = [":gpu_throughput_bench_lib"],
+)
+
+# ---------- Benchmark 2: CSR Compression Ratio ----------
+
+cuda_library(
+    name = "csr_compression_bench_lib",
+    srcs = ["csr_compression_bench.cu"],
+    copts = _CUDA_COPTS,
+    deps = [
+        "//src/core:sparse_format",
+        "//src/cuda:gpu_sparse_ops",
+    ],
+)
+
+cc_binary(
+    name = "csr_compression_bench",
+    deps = [":csr_compression_bench_lib"],
+)
+
+# ---------- Benchmark 3: Pinned vs Pageable Memory ----------
+
+cuda_library(
+    name = "pinned_memory_bench_lib",
+    srcs = ["pinned_memory_bench.cu"],
+    copts = _CUDA_COPTS,
+    deps = [
+        "//src/cuda:gpu_sparse_ops",
+    ],
+)
+
+cc_binary(
+    name = "pinned_memory_bench",
+    deps = [":pinned_memory_bench_lib"],
+)

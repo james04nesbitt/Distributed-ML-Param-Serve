@@ -1,12 +1,31 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_cuda//cuda:defs.bzl", "cuda_library")
 
 package(default_visibility = ["//visibility:public"])
 
+_CUDA_COPTS = [
+    "--std=c++17",
+    "-Xcompiler=/std:c++17",
+]
+
+# CUDA bridge: compiled by NVCC, no gRPC/protobuf headers.
+cuda_library(
+    name = "server_cuda_bridge",
+    srcs = ["server_cuda_bridge.cu"],
+    hdrs = ["server_cuda_bridge.h"],
+    copts = _CUDA_COPTS,
+    deps = [
+        "//src/cuda:gpu_parameter_store",
+    ],
+)
+
+# Server implementation: plain C++ compiled by MSVC.
 cc_library(
     name = "parameter_server_impl",
     srcs = ["parameter_server_impl.cc"],
     hdrs = ["parameter_server_impl.h"],
     deps = [
+        ":server_cuda_bridge",
         "//proto:parameter_server_cc_grpc",
         "//proto:parameter_server_cc_proto",
         "//src/core:parameter_store",

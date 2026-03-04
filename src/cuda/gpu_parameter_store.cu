@@ -157,5 +157,21 @@ void GPUParameterStore::CopyFromHost(const float *host_src, int32_t count) {
             "CopyFromHost");
 }
 
+void GPUParameterStore::CopyToHostAsync(float *pinned_dst, int32_t count,
+                                        void *stream) const {
+  CheckCuda(cudaMemcpyAsync(pinned_dst, d_params_, count * sizeof(float),
+                            cudaMemcpyDeviceToHost,
+                            static_cast<cudaStream_t>(stream)),
+            "CopyToHostAsync");
+}
+
+void GPUParameterStore::CopyFromHostAsync(const float *pinned_src,
+                                          int32_t count, void *stream) {
+  CheckCuda(cudaMemcpyAsync(d_params_, pinned_src, count * sizeof(float),
+                            cudaMemcpyHostToDevice,
+                            static_cast<cudaStream_t>(stream)),
+            "CopyFromHostAsync");
+}
+
 } // namespace cuda
 } // namespace paramserver

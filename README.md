@@ -1,130 +1,131 @@
-# Distributed Machine Learning Parameter Server
+# Distributed GPU-Accelerated Parameter Server
 
-**C++17 · CUDA · gRPC · Protobuf**
+**C++17 · CUDA · gRPC · Protobuf · Bazel**
 
-A high-performance distributed parameter server for sparse machine learning models, built in C++ with gRPC/Protobuf and GPU-accelerated via CUDA. Designed for highly concurrent, asynchronous training across multiple worker nodes.
+A high-performance distributed parameter server for sparse machine learning models, built in C++ with GPU-accelerated gradient synchronization via CUDA. Workers push compressed sparse gradients over gRPC; the server applies them using lock-free CUDA atomic operations on GPU-resident parameters — enabling fully asynchronous, barrier-free distributed SGD.
 
-## Key Features
+## Performance Highlights
 
-- **Asynchronous SGD with Hardware Atomics** — Lock-free parameter updates via CUDA atomic operations, eliminating mutex bottlenecks for sparse weight matrices
-- **CUDA Stream-Based Multi-Node Simulation** — Validates distributed training logic by simulating a multi-node cluster on a single GPU using independent CUDA streams
-- **CSR Gradient Compression** — Custom Compressed Sparse Row (CSR) serialization for gradient updates, dramatically reducing network payload sizes
-- **gRPC Communication** — High-throughput, low-latency RPC framework for worker ↔ server communication
+Benchmarked on **NVIDIA RTX 5070** (Blackwell, PCIe Gen4):
+
+| Metric | Result |
+|--------|--------|
+| GPU HBM throughput (atomicAdd SGD) | **585 GB/s** |
+| Speedup over CPU-bound baseline | **87×** (50M params) — up to **205×** at 1M |
+| Aggregate throughput (4 concurrent streams) | **592 GB/s** |
+| CSR payload reduction (90% sparse gradients) | **80%** smaller |
+| CSR payload reduction (99% sparse gradients) | **98%** smaller |
+| Pinned memory PCIe bandwidth | **28.7 GB/s** effective |
+| Communication latency cut (40 MB payload) | **5.67 ms** per transfer |
+| GPU CSR compression vs CPU | **7–28×** faster |
 
 ## Architecture
 
 ```
-┌───────────────┐   gRPC    ┌─────────────────────────┐   gRPC    ┌───────────────┐
-│   Worker 0    │◄─────────►│                         │◄─────────►│   Worker 2    │
-│  (CUDA Stream)│           │    Parameter Server     │           │  (CUDA Stream)│
-└───────────────┘           │                         │           └───────────────┘
-                            │  ┌───────────────────┐  │
-┌───────────────┐   gRPC    │  │  GPU Weight Store  │  │   gRPC    ┌───────────────┐
-│   Worker 1    │◄─────────►│  │  (lock-free via    │  │◄─────────►│   Worker 3    │
-│  (CUDA Stream)│           │  │   CUDA atomics)    │  │           │  (CUDA Stream)│
-└───────────────┘           │  └───────────────────┘  │           └───────────────┘
-                            └─────────────────────────┘
+┌───────────────┐   gRPC    ┌─────────────────────────────┐   gRPC    ┌───────────────┐
+│   Worker 0    │◄─────────►│                             │◄─────────►│   Worker 2    │
+│  (GPU + CSR)  │           │      Parameter Server       │           │  (GPU + CSR)  │
+└───────────────┘           │                             │           └───────────────┘
+                            │  ┌───────────────────────┐  │
+┌───────────────┐   gRPC    │  │  GPU Parameter Store   │  │   gRPC    ┌───────────────┐
+│   Worker 1    │◄─────────►│  │  (lock-free atomics,   │  │◄─────────►│   Worker 3    │
+│  (GPU + CSR)  │           │  │   8-stream pool)       │  │           │  (GPU + CSR)  │
+└───────────────┘           │  └───────────────────────┘  │           └───────────────┘
+                            └─────────────────────────────┘
 ```
 
-Workers push compressed (CSR) gradients and pull updated parameters asynchronously. The server applies gradients on the GPU using CUDA atomic operations, avoiding synchronization barriers. Multi-node behavior is validated by mapping each worker to an independent CUDA stream on a single GPU.
+**Data flow per iteration:**
+1. Worker generates sparse gradient on GPU
+2. GPU-native CSR compression (Thrust prefix-scan, no D→H copies)
+3. Async transfer to host via pinned (page-locked) memory
+4. gRPC `PushGradients` with CSR-serialized protobuf payload
+5. Server unpacks into pinned buffers → async H→D → `atomicAdd` kernel
+6. Worker pulls updated parameters via `PullParameters`
 
-## Benchmarks
-
-| Metric | Result |
-|--------|--------|
-| Throughput improvement vs synchronous (mutex-based) SGD | **4x** higher for sparse weight matrices |
-| Payload size reduction via CSR compression | **80%** smaller gradient messages |
-| Communication latency savings | **15ms** reduction per batch |
-
-## Roadmap
-
-### Milestone 1: Project Scaffolding & gRPC Plumbing ← *complete*
-- Bazel build system with gRPC/Protobuf + CUDA dependencies
-- Proto service definitions (`PushGradients`, `PullParameters`, `RegisterWorker`)
-- Skeleton server and worker binaries
-
-### Milestone 2: Core Parameter Store & Synchronous Push/Pull
-- In-memory weight matrix storage (CPU baseline)
-- Synchronous gradient application and parameter retrieval
-- End-to-end single-worker training loop
-
-### Milestone 3: GPU-Accelerated Parameter Store
-- CUDA kernel for parameter storage and gradient application
-- CUDA atomic operations for lock-free gradient accumulation
-- CUDA stream-per-worker simulation on a single GPU
-
-### Milestone 4: Asynchronous SGD
-- Async worker coordination (no global barriers)
-- Lock-free atomic gradient accumulation via CUDA hardware atomics
-- Throughput benchmarking vs synchronous baseline → **4x target**
-
-### Milestone 5: CSR Gradient Compression
-- CSR encoding/decoding for sparse gradient matrices
-- CUDA kernel for GPU-side CSR compression/decompression
-- Payload size benchmarks → **80% reduction target**
-- Communication latency benchmarks → **15ms savings target**
-
-### Milestone 6: Multi-Worker Integration & Final Benchmarking
-- Multi-worker orchestration with CUDA stream isolation
-- End-to-end distributed training benchmarks
-- Fault tolerance and worker recovery
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design decisions and component deep-dives.
 
 ## Project Structure
 
 ```
 Distributed-ML-Param-Serve/
-├── proto/                          # Protobuf/gRPC service definitions
+├── proto/                              # Protobuf/gRPC service definitions
 │   └── parameter_server.proto
 ├── src/
-│   ├── core/                       # Core libraries (CPU)
-│   │   ├── parameter_store.{h,cc}  # Weight matrix storage
-│   │   └── sparse_format.{h,cc}    # CSR compression utilities
-│   ├── cuda/                       # CUDA kernels
+│   ├── core/                           # CPU-side libraries
+│   │   ├── parameter_store.{h,cc}      # Weight matrix storage (CPU baseline)
+│   │   └── sparse_format.{h,cc}        # CSR compression utilities
+│   ├── cuda/                           # CUDA kernels & GPU data structures
 │   │   ├── gpu_parameter_store.{cuh,cu}  # GPU weight store + atomics
-│   │   └── gpu_sparse_ops.{cuh,cu}       # GPU CSR compress/decompress
-│   ├── server/                     # Parameter server
-│   │   ├── server_main.cc
-│   │   └── parameter_server_impl.{h,cc}
-│   └── worker/                     # Training workers
-│       ├── worker_main.cc
-│       └── worker_client.{h,cc}
-├── tests/                          # Unit tests (Google Test)
-├── MODULE.bazel                    # Bazel module (bzlmod)
-├── BUILD.bazel                     # Root build file
-└── .bazelrc                        # Bazel configuration
+│   │   └── gpu_sparse_ops.{cuh,cu}       # GPU CSR compress/decompress + pinned memory
+│   ├── server/                         # Parameter server
+│   │   ├── server_main.cc              # Server entry point
+│   │   ├── parameter_server_impl.{h,cc}  # gRPC service implementation
+│   │   └── server_cuda_bridge.{h,cu}     # CUDA bridge (NVCC isolation)
+│   └── worker/                         # Training workers
+│       ├── worker_main.cc              # Worker entry point + training loop
+│       ├── worker_client.{h,cc}        # gRPC client wrapper
+│       └── worker_cuda_ops.{cuh,cu}    # Worker-side CUDA kernels
+├── benchmarks/                         # Performance benchmarks
+│   ├── gpu_throughput_bench.cu         # GPU HBM throughput + CPU speedup
+│   ├── csr_compression_bench.cu        # CSR payload reduction
+│   └── pinned_memory_bench.cu          # Pinned vs pageable latency
+├── tests/                              # Unit tests (Google Test)
+├── MODULE.bazel                        # Bazel module (bzlmod)
+└── ARCHITECTURE.md                     # Detailed design document
 ```
 
 ## Building & Running
 
 ### Prerequisites
 - [Bazel](https://bazel.build/) 9.x
-- C++17 compatible compiler (MSVC, GCC, or Clang)
-- [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) 11.x+ (for GPU targets)
+- C++17 compatible compiler (MSVC 2022, GCC 11+, or Clang 14+)
+- [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) 12.x+ with an NVIDIA GPU
 
-### Build All (CPU only)
+### Build Everything
 ```bash
-bazel build //src/core/... //src/server:parameter_server //src/worker:worker //tests/...
+bazel build //src/server:parameter_server //src/worker:worker //benchmarks/...
 ```
 
-### Build CUDA Targets
+### Run the System
+
+**Terminal 1 — Parameter Server:**
 ```bash
-bazel build //src/cuda/... --@rules_cuda//cuda:enable
+# Args: [address] [total_params] [num_cuda_streams]
+bazel-bin/src/server/parameter_server.exe 0.0.0.0:50051 1000000 8
 ```
 
-### Run the Parameter Server
+**Terminal 2 — Worker:**
 ```bash
-bazel run //src/server:parameter_server
+# Args: [server_address] [worker_id] [iterations] [grad_rows] [grad_cols]
+bazel-bin/src/worker/worker.exe localhost:50051 0 100 1000 1000
 ```
 
-### Run a Worker
+### Run Benchmarks
 ```bash
-bazel run //src/worker:worker -- localhost:50051 0
+# GPU throughput & CPU vs GPU speedup
+bazel-bin/benchmarks/gpu_throughput_bench.exe
+
+# CSR compression ratio at various sparsity levels
+bazel-bin/benchmarks/csr_compression_bench.exe
+
+# Pinned vs pageable memory transfer latency
+bazel-bin/benchmarks/pinned_memory_bench.exe
 ```
 
 ### Run Tests
 ```bash
 bazel test //tests/...
 ```
+
+## Key Technologies
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Language | C++17 | Core implementation |
+| GPU Compute | CUDA + Thrust | Kernels, atomics, prefix-scan |
+| RPC | gRPC + Protobuf | Worker ↔ server communication |
+| Build | Bazel 9 (bzlmod) | Hermetic, reproducible builds |
+| Testing | Google Test | Unit + GPU test framework |
 
 ## License
 
